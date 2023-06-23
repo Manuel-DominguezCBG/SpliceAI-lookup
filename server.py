@@ -71,9 +71,9 @@ RATE_LIMIT_OUTLIER_IPS = get_rate_limit_outlier_ips()
 
 DISABLE_LOGGING_FOR_IPS = {f"63.143.42.{i}" for i in range(0, 256)}  # ignore uptimerobot.com IPs
 
-
-HG19_FASTA_PATH = os.path.expanduser("~/hg19.fa")
-HG38_FASTA_PATH = os.path.expanduser("~/hg38.fa")
+# Around 7GB, it cannot be in the container
+HG19_FASTA_PATH = os.path.expanduser("/Users/monkiky/Desktop/references_file/hg19.fa")
+HG38_FASTA_PATH = os.path.expanduser("/Users/monkiky/Desktop/references_file/hg38.fa")
 
 SPLICEAI_CACHE_FILES = {}
 if socket.gethostname() == "spliceai-lookup":
