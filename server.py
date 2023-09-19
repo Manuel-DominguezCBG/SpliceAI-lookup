@@ -6,7 +6,6 @@ import os
 import pandas as pd
 import pysam
 import re
-import redis
 import socket
 import subprocess
 import sys
@@ -71,9 +70,9 @@ RATE_LIMIT_OUTLIER_IPS = get_rate_limit_outlier_ips()
 
 DISABLE_LOGGING_FOR_IPS = {f"63.143.42.{i}" for i in range(0, 256)}  # ignore uptimerobot.com IPs
 
-# Around 7GB, it cannot be in the container
-HG19_FASTA_PATH = os.path.expanduser("/Users/monkiky/Desktop/references_file/hg19.fa")
-HG38_FASTA_PATH = os.path.expanduser("/Users/monkiky/Desktop/references_file/hg38.fa")
+
+HG19_FASTA_PATH = os.path.expanduser("/Users/jocotton/Desktop/references_files/hg19.fa")
+HG38_FASTA_PATH = os.path.expanduser("/Users/jocotton/Desktop/references_files/hg38.fa")
 
 SPLICEAI_CACHE_FILES = {}
 if socket.gethostname() == "spliceai-lookup":
@@ -98,10 +97,11 @@ else:
         ("masked", "snv", "hg38"): pysam.TabixFile("./test_data/spliceai_scores.masked.snv.hg38_subset.vcf.gz"),
     }
 
-GRCH37_ANNOTATIONS = "./annotations/gencode.v43lift37.annotation.txt.gz"
-GRCH38_ANNOTATIONS = "./annotations/gencode.v43.annotation.txt.gz"
-PANGOLIN_GRCH37_ANNOTATIONS = "./annotations/gencode.v43lift37.annotation.without_chr_prefix.db"
-PANGOLIN_GRCH38_ANNOTATIONS = "./annotations/gencode.v43.annotation.db"
+GRCH37_ANNOTATIONS = "/Users/jocotton/Desktop/references_files/annotations/gencode.v43lift37.annotation.txt.gz"
+#/Users/jocotton/Desktop/references_files/annotations/gencode.v43lift37.annotation.txt.gz
+GRCH38_ANNOTATIONS = "/Users/jocotton/Desktop/references_files/annotations/gencode.v43.annotation.txt.gz"
+PANGOLIN_GRCH37_ANNOTATIONS = "/Users/jocotton/Desktop/references_files/annotations/gencode.v43lift37.annotation.without_chr_prefix.db"
+PANGOLIN_GRCH38_ANNOTATIONS = "/Users/jocotton/Desktop/references_files/annotations/gencode.v43.annotation.db"
 
 PANGOLIN_MODELS = []
 for i in 0, 2, 4, 6:
@@ -153,7 +153,13 @@ VARIANT_RE = re.compile(
     "(?P<alt>[ACGT]+)"
 )
 
-REDIS = redis.Redis(host='localhost', port=6379, db=0)  # in-memory cache server which may or may not be running
+USE_REDIS = False
+
+if USE_REDIS:
+    import redis
+    REDIS = redis.Redis(host='localhost', port=6379, db=0)  # in-memory cache server which may or may not be running
+else:
+    REDIS = None
 
 
 def error_response(error_message, source=None):
@@ -194,6 +200,9 @@ def get_splicing_scores_redis_key(tool_name, variant, genome_version, distance, 
 
 
 def get_splicing_scores_from_redis(tool_name, variant, genome_version, distance, mask, use_precomputed_scores):
+    if REDIS is None:
+        return None
+
     key = get_splicing_scores_redis_key(tool_name, variant, genome_version, distance, mask, use_precomputed_scores)
     results = None
     try:
@@ -208,6 +217,9 @@ def get_splicing_scores_from_redis(tool_name, variant, genome_version, distance,
 
 
 def add_splicing_scores_to_redis(tool_name, variant, genome_version, distance, mask, use_precomputed_scores, results):
+    if REDIS is None:
+        return
+
     key = get_splicing_scores_redis_key(tool_name, variant, genome_version, distance, mask, use_precomputed_scores)
     try:
         results_string = json.dumps(results)
@@ -225,6 +237,9 @@ def exceeds_rate_limit(user_id, request_type):
 
     Return str: error message about exceeding the rate limit, or None if the rate limit was not exceeded
     """
+    if REDIS is None:
+        return False
+
     if request_type not in RATE_LIMIT_REQUESTS_PER_USER_PER_MINUTE:
         raise ValueError(f"Invalid 'request_type' arg value: {request_type}")
 
@@ -347,7 +362,6 @@ def get_spliceai_scores(variant, genome_version, distance_param, mask_param, use
             print(f"ERROR: couldn't retrieve scores using tabix: {type(e)}: {e}", flush=True)
 
     # run the SpliceAI model to compute the scores
-    all_scores = []
     if not scores:
         error_message = exceeds_rate_limit(request.remote_addr, request_type="spliceai:model")
         if error_message:
@@ -359,22 +373,12 @@ def get_spliceai_scores(variant, genome_version, distance_param, mask_param, use
 
         record = VariantRecord(chrom, pos, ref, alt)
         try:
-            #scores, all_scores = get_delta_scores(
             scores = get_delta_scores(
                 record,
                 SPLICEAI_ANNOTATOR[genome_version],
                 distance_param,
                 mask_param)
             source = "spliceai:model"
-
-            #print("All scores:", flush=True)
-            #all_scores_transript0 = all_scores[0]
-            #all_scores_transript0["position"] = list(range(-distance_param, distance_param + 1))
-            #df = pd.DataFrame(all_scores_transript0)
-            #df = df.applymap(lambda x: "{:.2f}".format(x) if x >= 0.01 else "")
-            #print(df, flush=True)
-
-            #print(f"Computed: ", scores, flush=True)
         except Exception as e:
             return {
                 "variant": variant,
@@ -390,7 +394,20 @@ def get_spliceai_scores(variant, genome_version, distance_param, mask_param, use
                      f"variant falling outside of all Gencode exons and introns.",
         }
 
-    scores = [s[s.index("|")+1:] for s in scores]  # drop allele field
+    #scores = [s[s.index("|")+1:] for s in scores]  # drop allele field
+
+    # to reduce the response size, return all non-zero scores only for the canonial transcript (or the 1st transcript)
+    all_non_zero_scores = None
+    for i, transcript_scores in enumerate(scores):
+        if "ALL_NON_ZERO_SCORES" not in transcript_scores:
+            continue
+
+        gene_name = transcript_scores.get("SYMBOL", "")
+        gene_name_fields = gene_name.split("---")
+        if i == 0 or (len(gene_name_fields) > 3 and gene_name_fields[3] == "yes"):
+            all_non_zero_scores = transcript_scores["ALL_NON_ZERO_SCORES"]
+
+        del transcript_scores["ALL_NON_ZERO_SCORES"]
 
     return {
         "variant": variant,
@@ -401,6 +418,7 @@ def get_spliceai_scores(variant, genome_version, distance_param, mask_param, use
         "alt": alt,
         "scores": scores,
         "source": source,
+        "all_non_zero_scores": all_non_zero_scores,
     }
 
 
@@ -583,7 +601,6 @@ def run_splice_prediction_tool(tool_name):
     response_json['duration'] = duration
 
     if request.remote_addr not in DISABLE_LOGGING_FOR_IPS:
-        print(f"{logging_prefix}: {request.remote_addr}: {variant} response: {response_json}", flush=True)
         print(f"{logging_prefix}: {request.remote_addr}: {variant} took {duration}", flush=True)
 
     return Response(json.dumps(response_json), status=200, mimetype='application/json')
@@ -652,6 +669,9 @@ def get_liftover_redis_key(genome_version, chrom, start, end):
 
 
 def get_liftover_from_redis(hg, chrom, start, end):
+    if REDIS is None:
+        return None
+
     key = get_liftover_redis_key(hg, chrom, start, end)
     results = None
     try:
@@ -665,6 +685,9 @@ def get_liftover_from_redis(hg, chrom, start, end):
 
 
 def add_liftover_to_redis(hg, chrom, start, end, result):
+    if REDIS is None:
+        return
+
     key = get_liftover_redis_key(hg, chrom, start, end)
     try:
         results_string = json.dumps(result)
@@ -781,8 +804,15 @@ def send_annotations(path):
 @app.route('/', strict_slashes=False, defaults={'path': ''})
 @app.route('/<path:path>/')
 def catch_all(path):
-    with open("README.md") as f:
-        return markdown2.markdown(f.read())
+    if not path or path == "index.html":
+        with open("index.html", "rt") as f:
+            html = f.read()
+        return Response(html, mimetype='text/html')
+    elif path == "favicon.ico":
+        return send_from_directory('', 'favicon.ico')
+    else:
+        with open("README.md") as f:
+            return markdown2.markdown(f.read())
 
 
 print("Initialization completed.", flush=True)
