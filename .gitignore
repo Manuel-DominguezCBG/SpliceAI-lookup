@@ -1,7 +1,7 @@
 .idea
 *.iml
 *.db
-
+*.sift
 
 # Data
 *.fa
