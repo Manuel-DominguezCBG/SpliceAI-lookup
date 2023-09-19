@@ -1,8 +1,7 @@
 .idea
 *.iml
-*.txt
 *.db
-*.txt.gz
+
 
 # Data
 *.fa
