@@ -3,6 +3,7 @@ import requests
 import json
 import numpy as np  # Import NumPy for NaN
 import unittest
+import sys
 
 
 
@@ -124,7 +125,7 @@ if __name__ == "__main__":
     """
 
     # 1. Reading the CSV into a DataFrame.
-    df = pd.read_csv("./spliceai_control.csv")
+    df = pd.read_csv(sys.argv[1])
 
     print(f"Analysing and testing {len(df)} variants. This will take a while")
     columns_to_convert = ['DS_AG-CONTROL', 'DS_AL-CONTROL', 'DS_DG-CONTROL', 'DS_DL-CONTROL', 'DP_AG-CONTROL']
